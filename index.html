@@ -623,11 +623,10 @@ function harvardInTextOrg(orgName, year, page){
   return page ? `(${orgName}, ${year || 'n.d.'}, p. ${page})` : `(${orgName}, ${year || 'n.d.'})`;
 }
 
-/* ---------------- academic search: Semantic Scholar + Crossref ---------------- */
+/* ---------------- academic search: Crossref ---------------- */
 let academicData = [];   // last fetched, deduped, relevance-filtered, in original relevance order
 let academicErrors = [];
 let filteredOutCount = 0; // off-topic results removed by the relevance filter
-let industryArticles = {}; // domain -> {title,url,date} | null
 let currentQuery = "";
 let viewMode = 'mixed';  // 'mixed' | 'split'
 let sortMode = 'relevance'; // 'relevance' | 'newest' | 'oldest'
@@ -658,21 +657,10 @@ function selectCategory(cat){
   renderView();
 }
 
-async function searchSemanticScholar(query){
-  const url = `https://api.semanticscholar.org/graph/v1/paper/search?query=${encodeURIComponent(query)}&fields=title,abstract,authors,year,venue,externalIds,url&limit=10`;
-  const res = await fetch(url);
-  if(!res.ok) throw new Error('Semantic Scholar request failed: ' + res.status);
-  const data = await res.json();
-  return (data.data||[]).map(p=>({
-    source:'Semantic Scholar',
-    title: p.title,
-    authors: (p.authors||[]).map(a=>a.name),
-    year: p.year,
-    venue: p.venue,
-    abstract: p.abstract,
-    url: p.url || (p.externalIds && p.externalIds.DOI ? `https://doi.org/${p.externalIds.DOI}` : '#')
-  }));
-}
+/* NOTE: Semantic Scholar's API does not send CORS headers permitting browser
+   fetches from other origins (confirmed by live testing), so it cannot be
+   called client-side from a static page. Crossref does support this and is
+   used as the sole academic source below. */
 
 async function searchCrossref(query){
   const url = `https://api.crossref.org/works?query.bibliographic=${encodeURIComponent(query)}&rows=12`;
@@ -702,10 +690,10 @@ function dedupe(list){
 }
 
 /* ---------------- relevance filter ----------------
-   Crossref & Semantic Scholar both do loose keyword matching across their whole
-   corpus (any discipline), so a query like "demographic data for dance music
-   audiences in the UK" can pull back an unrelated economics or pharma paper that
-   only happens to share a word like "UK". This filters those out client-side. */
+   Crossref does loose keyword matching across its whole corpus (any
+   discipline), so a query like "demographic data for dance music audiences
+   in the UK" can pull back an unrelated economics or pharma paper that only
+   happens to share a word like "UK". This filters those out client-side. */
 const STOPWORDS = new Set(["the","and","of","for","in","on","a","an","to","is","are","with","that","this",
   "by","from","at","as","or","be","how","what","why","which","its","into","about","over","under","do","does"]);
 
@@ -724,32 +712,12 @@ function isRelevant(item, sigTerms){
   return matches >= needed;
 }
 
-/* ---------------- one likely article per industry source, via GDELT (free, no key) ---------------- */
-async function fetchTopArticleForSource(domain, query){
-  const controller = new AbortController();
-  const timer = setTimeout(()=>controller.abort(), 6000);
-  try{
-    const q = `${query} domain:${domain}`;
-    const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(q)}&mode=artlist&maxrecords=1&sort=hybridrel&format=json`;
-    const res = await fetch(url, {signal: controller.signal});
-    clearTimeout(timer);
-    if(!res.ok) return null;
-    const data = await res.json();
-    const art = data && data.articles && data.articles[0];
-    if(!art || !art.url) return null;
-    return { title: art.title || '(untitled article)', url: art.url, date: art.seendate || '' };
-  }catch(e){
-    clearTimeout(timer);
-    return null;
-  }
-}
-
-async function fetchIndustryArticles(query){
-  const settled = await Promise.allSettled(INDUSTRY_SOURCES.map(s=>fetchTopArticleForSource(s.domain, query)));
-  const map = {};
-  INDUSTRY_SOURCES.forEach((s,i)=>{ map[s.domain] = settled[i].status==='fulfilled' ? settled[i].value : null; });
-  industryArticles = map;
-}
+/* NOTE: an earlier version tried to auto-match one likely article per
+   industry source via GDELT's news API. Live testing showed GDELT also does
+   not send CORS headers for browser fetches from other origins, so that
+   fetch silently failed 100% of the time. Removed rather than ship a feature
+   that never actually works — the reliable path is the "search this source"
+   link plus the citation builder below. */
 
 function getSortedAcademic(){
   const list = [...academicData];
@@ -796,45 +764,16 @@ function academicCardHTML(p){
 
 function industryCardHTML(s, query){
   const searchUrl = `https://www.google.com/search?q=site:${encodeURIComponent(s.domain)}+${encodeURIComponent(query)}`;
-  const searchBtn = `<a class="pill-btn" href="${searchUrl}" target="_blank" rel="noopener">🔎 Search this source for other results for this search term</a>`;
-  const art = industryArticles[s.domain];
-  const id = `ind-${idCounter++}`;
-
-  if(art){
-    const year = art.date ? art.date.slice(0,4) : 'n.d.';
-    const dateStr = art.date ? `${art.date.slice(0,4)}-${art.date.slice(4,6)}-${art.date.slice(6,8)}` : null;
-    const fullRef = harvardWebsite(s.name, year, art.title, art.url);
-    const dedupeKey = art.url || (art.title||'').toLowerCase();
-    const alreadyAdded = bibliography.some(b=>b.key===dedupeKey);
-    const pseudo = {authors:[s.name], year, title:art.title, url:art.url, __org:true};
-    return `
-      <div class="card">
-        <div class="kind-pill kind-industry">🏢 Industry source</div>
-        <div class="src-url">${s.domain} · ${s.tag}</div>
-        <h3 class="industry-title">${s.name}</h3>
-        <div class="meta">${s.desc}</div>
-        <div class="snippet">Most likely match: <a href="${art.url}" target="_blank" rel="noopener">${escapeHtml(art.title)}</a>${dateStr ? ' · ' + dateStr : ''}</div>
-        <div class="card-actions">
-          <button class="pill-btn" onclick="toggleCitation('${id}')">Show Harvard citation</button>
-          <button class="pill-btn ${alreadyAdded?'added':''}" id="btn-${id}" onclick='addIndustryToBiblio(${JSON.stringify(s).replace(/'/g,"&#39;")}, ${JSON.stringify(art).replace(/'/g,"&#39;")}, "${id}")'>${alreadyAdded?'✓ Added':'+ Add to reading list'}</button>
-          <button class="pill-btn" onclick="toggleQuotePanel('${id}')">💬 Add a quote</button>
-          ${searchBtn}
-        </div>
-        <div class="citation-box" id="cite-${id}">${escapeHtml(fullRef)}</div>
-        ${quotePanelHTML(id, 'industry', pseudo)}
-      </div>`;
-  }
-
+  const searchBtn = `<a class="pill-btn" href="${searchUrl}" target="_blank" rel="noopener">🔎 Search this source for "${escapeHtml(query)}"</a>`;
   return `
     <div class="card">
       <div class="kind-pill kind-industry">🏢 Industry source</div>
       <div class="src-url">${s.domain} · ${s.tag}</div>
       <h3 class="industry-title">${s.name}</h3>
       <div class="meta">${s.desc}</div>
-      <div class="snippet" style="font-style:italic; color:var(--muted);">No indexed article found for this search term.</div>
       <div class="card-actions">
         ${searchBtn}
-        <button class="pill-btn" onclick="openModal('${s.name.replace(/'/g,"\\'")}', '${s.domain}')">Cite what you find</button>
+        <button class="pill-btn" onclick="openModal('${s.name.replace(/'/g,"\\'")}', '${s.domain}')">Cite an article from here</button>
       </div>
     </div>`;
 }
@@ -845,34 +784,26 @@ async function performSearch(query){
   academicData = [];
   academicErrors = [];
   filteredOutCount = 0;
-  industryArticles = {};
 
-  const loadingMsg = includeAcademic
-    ? '<div class="loading">Searching academic databases and industry sources…</div>'
-    : '<div class="loading">Searching industry sources…</div>';
-  document.getElementById('mixedResults').innerHTML = loadingMsg;
+  if(includeAcademic){
+    const loadingMsg = '<div class="loading">Searching academic databases…</div>';
+    document.getElementById('mixedResults').innerHTML = loadingMsg;
+    document.getElementById('academicResults').innerHTML = loadingMsg;
+  }
   document.getElementById('mixedStatus').textContent = '';
-  document.getElementById('academicResults').innerHTML = includeAcademic ? loadingMsg : '';
   document.getElementById('academicStatus').textContent = '';
-  document.getElementById('industryResults').innerHTML = loadingMsg;
 
-  const academicPromise = includeAcademic
-    ? Promise.allSettled([searchSemanticScholar(query), searchCrossref(query)]).then(settled=>{
-        let combined = [];
-        settled.forEach((r,i)=>{
-          if(r.status==='fulfilled') combined = combined.concat(r.value);
-          else academicErrors.push(i===0?'Semantic Scholar':'Crossref');
-        });
-        const deduped = dedupe(combined);
-        const sigTerms = significantTerms(query);
-        academicData = deduped.filter(p=>isRelevant(p, sigTerms));
-        filteredOutCount = deduped.length - academicData.length;
-      })
-    : Promise.resolve();
-
-  const industryPromise = fetchIndustryArticles(query);
-
-  await Promise.all([academicPromise, industryPromise]);
+  if(includeAcademic){
+    try{
+      const combined = await searchCrossref(query);
+      const deduped = dedupe(combined);
+      const sigTerms = significantTerms(query);
+      academicData = deduped.filter(p=>isRelevant(p, sigTerms));
+      filteredOutCount = deduped.length - academicData.length;
+    }catch(e){
+      academicErrors.push('Crossref');
+    }
+  }
 
   renderIndustryPanel(query);
   renderView();
@@ -897,10 +828,8 @@ function renderMixedPanel(){
   const sorted = includeAcademic ? getSortedAcademic() : [];
 
   let html = '';
-  if(includeAcademic && academicErrors.length===2){
-    html += `<div class="error-box">Couldn't reach either academic database (Semantic Scholar or Crossref). Check your internet connection and try again — industry sources are still shown below.</div>`;
-  } else if(includeAcademic && academicErrors.length===1){
-    html += `<div class="error-box">Couldn't reach ${academicErrors[0]}. Showing results from the other academic source, plus industry sources.</div>`;
+  if(includeAcademic && academicErrors.length>0){
+    html += `<div class="error-box">Couldn't reach Crossref (academic database). Check your internet connection and try again — industry sources are still shown below.</div>`;
   }
 
   const combinedItems = interleave(sorted, sourcesForView);
@@ -919,7 +848,7 @@ function renderAcademicPanel(){
   const resultsEl = document.getElementById('academicResults');
 
   if(!includeAcademic){
-    resultsEl.innerHTML = `<div class="empty-box">Academic search is switched off. Turn on "Include academic papers" above the results to search Semantic Scholar and Crossref alongside the industry sources.</div>`;
+    resultsEl.innerHTML = `<div class="empty-box">Academic search is switched off. Turn on "Include academic papers" above the results to search Crossref alongside the industry sources.</div>`;
     statusEl.textContent = '';
     return;
   }
@@ -927,14 +856,11 @@ function renderAcademicPanel(){
   const sorted = getSortedAcademic();
 
   let html = '';
-  if(academicErrors.length===2){
-    html += `<div class="error-box">Couldn't reach either academic database. Check your internet connection and try again.</div>`;
+  if(academicErrors.length>0){
+    html += `<div class="error-box">Couldn't reach Crossref. Check your internet connection and try again.</div>`;
     resultsEl.innerHTML = html;
     statusEl.textContent = '';
     return;
-  }
-  if(academicErrors.length===1){
-    html += `<div class="error-box">Couldn't reach ${academicErrors[0]}. Showing results from the other source.</div>`;
   }
   if(sorted.length===0){
     const note = filteredOutCount>0 ? ` (${filteredOutCount} off-topic result${filteredOutCount===1?'':'s'} filtered out)` : '';
