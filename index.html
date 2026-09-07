@@ -422,6 +422,11 @@
     <label>Page or paragraph (optional)</label>
     <input id="m-page" type="text" placeholder="e.g. 4">
 
+    <label style="display:flex; align-items:flex-start; gap:8px; margin:18px 0 4px; font-size:13px; color:#444; cursor:pointer; line-height:1.4;">
+      <input type="checkbox" id="m-confirm" style="margin-top:3px; flex-shrink:0;">
+      <span>I read this source myself and confirm this citation is accurate.</span>
+    </label>
+
     <div class="modal-actions">
       <button class="btn-secondary" onclick="closeModal()">Cancel</button>
       <button class="btn-primary" onclick="generateManualCitation()">Generate &amp; add to reading list</button>
@@ -989,11 +994,29 @@ function onToggleAcademic(){
 let bibliography = []; // {id, key, text, sortKey}
 let biblioIdCounter = 1;
 
+function saveBiblio(){
+  try{
+    localStorage.setItem('crescendo_bibliography', JSON.stringify(bibliography));
+    localStorage.setItem('crescendo_biblioIdCounter', String(biblioIdCounter));
+  }catch(e){ /* storage unavailable (private browsing, quota, etc) — reading list just won't persist */ }
+}
+
+function loadBiblio(){
+  try{
+    const saved = localStorage.getItem('crescendo_bibliography');
+    const savedCounter = localStorage.getItem('crescendo_biblioIdCounter');
+    if(saved){ bibliography = JSON.parse(saved) || []; }
+    if(savedCounter){ biblioIdCounter = parseInt(savedCounter, 10) || 1; }
+  }catch(e){ bibliography = []; /* storage unavailable or corrupt — start fresh */ }
+  updateBiblioCount();
+}
+
 function addAcademicToBiblio(p, id){
   const text = harvardArticle(p);
   const key = (p.url && p.url !== '#') ? p.url : (p.title||'').toLowerCase();
   if(bibliography.find(b=>b.key===key)){ showToast('Already in your reading list'); return; }
   bibliography.push({id: biblioIdCounter++, key, text, sortKey: (p.authors&&p.authors[0]) ? p.authors[0].split(' ').pop() : 'zzz'});
+  saveBiblio();
   updateBiblioCount();
   const btn = document.getElementById(`btn-${id}`);
   if(btn){ btn.textContent = '✓ Added'; btn.classList.add('added'); }
@@ -1006,6 +1029,7 @@ function addIndustryToBiblio(s, art, id){
   const key = art.url || (art.title||'').toLowerCase();
   if(bibliography.find(b=>b.key===key)){ showToast('Already in your reading list'); return; }
   bibliography.push({id: biblioIdCounter++, key, text, sortKey: s.name});
+  saveBiblio();
   updateBiblioCount();
   const btn = document.getElementById(`btn-${id}`);
   if(btn){ btn.textContent = '✓ Added'; btn.classList.add('added'); }
@@ -1019,6 +1043,7 @@ function openModal(name, domain){
   document.getElementById('m-url').value = `https://${domain}`;
   document.getElementById('m-quote').value = '';
   document.getElementById('m-page').value = '';
+  document.getElementById('m-confirm').checked = false;
   document.getElementById('modalQuoteOut').style.display = 'none';
   document.getElementById('modalQuoteOut').innerHTML = '';
   document.getElementById('citeModal').classList.add('show');
@@ -1026,6 +1051,10 @@ function openModal(name, domain){
 function closeModal(){ document.getElementById('citeModal').classList.remove('show'); }
 
 function generateManualCitation(){
+  if(!document.getElementById('m-confirm').checked){
+    showToast('Please confirm you read the source before adding it to your reading list');
+    return;
+  }
   const author = document.getElementById('m-author').value.trim() || 'Anon.';
   const year = document.getElementById('m-year').value.trim();
   const title = document.getElementById('m-title').value.trim() || '[Untitled page]';
@@ -1037,6 +1066,7 @@ function generateManualCitation(){
   const dedupeKey = (url && url !== '#') ? url : title.toLowerCase();
   if(!bibliography.find(b=>b.key===dedupeKey)){
     bibliography.push({id: biblioIdCounter++, key: dedupeKey, text: fullRef, sortKey: author});
+    saveBiblio();
     updateBiblioCount();
   }
 
@@ -1079,6 +1109,7 @@ function closeBiblio(){ document.getElementById('biblioModal').classList.remove(
 
 function removeFromBiblio(id){
   bibliography = bibliography.filter(b=>b.id!==id);
+  saveBiblio();
   updateBiblioCount();
   openBiblio();
   showToast('Removed from reading list');
@@ -1125,6 +1156,8 @@ function runSearch(qOverride){
 
 document.getElementById('citeModal').addEventListener('click', e=>{ if(e.target.id==='citeModal') closeModal(); });
 document.getElementById('biblioModal').addEventListener('click', e=>{ if(e.target.id==='biblioModal') closeBiblio(); });
+
+loadBiblio();
 </script>
 </body>
 </html>
